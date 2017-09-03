@@ -35,16 +35,5 @@ EOC
 sudo systemctl daemon-reload
 sudo systemctl enable bluezalsa.service
 
-cat >  /etc/bluetooth/audio.conf <<EOC
-[General]
-Class = 0x20041C
-Enable = Source,Sink,Media,Socket
-EOC
-
-cat > /etc/bluetooth/main.conf <<EOC
-[General]
-Class = 0x20041C
-EOC
-
 #requred to end the plugin install
 echo "plugininstallend"

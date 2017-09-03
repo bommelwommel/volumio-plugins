@@ -6,6 +6,8 @@ var fs = require('fs-extra');
 var io = require('socket.io-client');
 var blue = require('bluetoothctl');
 var execSync = require('child_process').execSync;
+var udevMonitor = require('udev').monitor();
+var InputEvent = require('input-event');
 
 blue.Bluetooth();
 
@@ -28,9 +30,13 @@ function BluetoothController(context) {
 // define behaviour on system start up. In our case just read config file
 BluetoothController.prototype.onVolumioStart = function() {
     var self = this;
+    var defer = libQ.defer();
+
     var configFile = this.commandRouter.pluginManager.getConfigurationFile(this.context, 'config.json');
     this.config = new (require('v-conf'))();
     this.config.loadFile(configFile);
+
+    return defer.promise;
 };
 
 // Volumio needs this
@@ -44,6 +50,7 @@ BluetoothController.prototype.onStart = function () {
     var defer = libQ.defer();
     
     self.initBluetooth();
+    self.initInputBinding();
 
     defer.resolve();
     return defer.promise;
@@ -54,6 +61,7 @@ BluetoothController.prototype.onStop = function () {
     var self = this;
     var defer = libQ.defer();
 
+    udevMonitor.close();
 
     return defer.promise;
 };
@@ -91,6 +99,65 @@ BluetoothController.prototype.saveOptions = function(data) {
 
     self.commandRouter.pushToastMessage('success', self.commandRouter.getI18nString('BLUETOOTH_SETTINGS'), self.commandRouter.getI18nString('COMMON.SETTINGS_SAVED_SUCCESSFULLY'));
 };
+
+// allow mpd to collect configured bluetooth devices
+BluetoothController.prototype.getConfigParam = function (key) {
+    var self = this;
+    var result = this.config.get(key);
+    if(!result) {
+        var keys = this.config.getKeys(key)
+        self.logger.info('Keys : ' + JSON.stringify(keys, null,4));
+        
+        if(keys.length > 0) {
+            result = [];
+            for(var i = 0; i < keys.length; ++i) {
+                var value  = self.config.get(key + '.' + keys[i]);
+                result.push(JSON.parse(value));
+            }   
+        }
+    }
+    return result;
+}
+
+// setup input key binding for bt device buttons
+BluetoothController.prototype.initInputBinding = function() {
+    var self = this; 
+    
+    udevMonitor.on('add', function(device) {
+        self.logger.info('added BT device ' + JSON.stringify(device,null,4));
+        if(device.DEVNAME && device.DEVNAME.startsWith('/dev/input/')){
+            self.logger.info('added input' + device.DEVNAME )
+            var input = new InputEvent(device.DEVNAME);
+            var keyboard = new InputEvent.Keyboard(input);
+            keyboard.on('keypress', function(event) {
+                self.logger.info('Received Key: ' + event.code);
+                switch(event.code)
+                {
+                    case 165: // prev
+                        //self.commandRouter.volumioPrevious.bind(self.commandRouter);
+                        socket.emit('prev');
+                        break;
+                    case 163: // next
+                        socket.emit('next');
+                        //self.commandRouter.volumioNext.bind(self.commandRouter);
+                        break;
+                    case 200: // start 
+                        //self.commandRouter.volumioToggle.bind(self.commandRouter);               
+                        socket.emit('play');
+                        break;
+                    case 201: // pause
+                        socket.emit('pause');
+                        break;
+                }
+            });
+        }
+    });
+
+    udevMonitor.on('remove', function(device){
+        self.logger.info('removed BT device ' + JSON.stringify(device,null,4));
+    });
+}
+
 
 // initialize bluetooth controller and start scan
 BluetoothController.prototype.initBluetooth = function() {
@@ -148,7 +215,16 @@ BluetoothController.prototype.connectBluetoothDevice = function(data) {
     blue.trust(mac);
     blue.connect(mac);
 
-    self.writeAsoundFile(mac);
+    var key = 'pairedDevices.' + mac;
+    var already_known = self.config.has(key);
+    self.logger.info('known: '+ already_known);
+    if(!already_known) {
+        var device = blue.devices.filter(function(item){return item.mac == mac;})[0];
+        self.logger.info(JSON.stringify(device, null, 4));
+        self.config.addConfigValue(key,'string', JSON.stringify(device));
+    }
+    self.updateMPD();
+    //self.writeAsoundFile(mac);
 
     return self.getBluetoothDevices();
 };
@@ -163,7 +239,12 @@ BluetoothController.prototype.disconnectBluetoothDevice = function(data) {
     blue.untrust(mac);
     blue.remove(mac);
     
-    self.writeAsoundFile();
+    var key = 'pairedDevices.'+ mac;
+    self.config.delete(key);
+    self.updateMPD();
+    
+
+    //self.writeAsoundFile();
 
     return self.getBluetoothDevices();
 };
@@ -198,7 +279,7 @@ BluetoothController.prototype.writeAsoundFile = function(mac) {
         asoundcontent += 'interface "hci0"            # host Bluetooth adapter \n';
         asoundcontent += '   device "' + mac + '"  # Bluetooth headset MAC address \n';
         asoundcontent += '   profile "a2dp" \n';
-        asoundcontent += '}/n';
+        asoundcontent += '}\n';
     }
 
 
@@ -213,3 +294,14 @@ BluetoothController.prototype.writeAsoundFile = function(mac) {
 		}
 	});
 };
+
+BluetoothController.prototype.updateMPD = function() {
+    var self = this;
+    var result = self.commandRouter.executeOnPlugin('music_service', 'mpd', 'createMPDFile', self.updateMPDCallback);
+}
+
+BluetoothController.prototype.updateMPDCallback = function(error) {
+    if(error)
+        self.commandRouter.pushToastMessage('Error', error);
+
+}
